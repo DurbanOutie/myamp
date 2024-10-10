@@ -1,0 +1,13 @@
+[Text]
+Normal=#008000
+Current=#F55A05
+NormalBG=#F5B491
+SelectedBG=#FFFFFF
+MBBG=#FFFFFF
+MBFG=#F55A05
+Font=Comic Sans MS
+
+Created for What's Up Doc?? (Bugs Bunny)
+by: Mrs Bladez (Dec 2001)
+
+

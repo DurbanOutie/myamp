@@ -1,0 +1,87 @@
+Include SDL
+
+SDL Uses OG main so
+
+```
+int main(int argc, char **argv);
+```
+
+To Start Call SDL_Init(int flags);
+flags like
+SDL_INIT_VIDEO
+SDL_INIT_AUDIO
+
+To Stop Call SDL_Quit();
+
+
+Creating an audio app, check SDL_audio.h
+
+we find this method to open an audio device
+
+```
+
+extern DECLSPEC SDL_AudioDeviceID SDLCALL SDL_OpenAudioDevice(
+                                                  const char *device,
+                                                  int iscapture,
+                                                  const SDL_AudioSpec *desired,
+                                                  SDL_AudioSpec *obtained,
+                                                  int allowed_changes);
+
+```
+
+looking at the comment, it tells us how to populate the method call
+
+device can be NULL and a default will be provided
+iscapture can be 0 as we want a playback device
+
+desired is the audio device we want
+
+We can declare a new SDL_AudioSpec and Zero it out using
+SDL_Zero(desired);
+
+for each component in the desired device
+freq is the audio frequency = set to appropriate audio frequency 
+ie 48000 or 44100
+format = we are setting the format to AUDIO_F32
+channels = 2 for stereo
+samples = buffer size for samples base 2 number like 4096
+padding = not woried
+size = filled in by SDL
+callback = NULL (we wont use callback to fill the sound)
+
+
+
+
+
+
+
+obtained is the audio device we received, we can set this to NULL if
+we want SDL to align obtained to desired using some internal mechanism
+
+allowed_changes are flags regarding the above. if 0 is set then the device
+returned should be the device expected. though SDL could return an
+altered device if the appropriate flags are provided
+ * - `SDL_AUDIO_ALLOW_FREQUENCY_CHANGE`
+ * - `SDL_AUDIO_ALLOW_FORMAT_CHANGE`
+ * - `SDL_AUDIO_ALLOW_CHANNELS_CHANGE`
+ * - `SDL_AUDIO_ALLOW_SAMPLES_CHANGE`
+ * - `SDL_AUDIO_ALLOW_ANY_CHANGE`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
