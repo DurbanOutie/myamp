@@ -129,6 +129,90 @@ static void panic_and_abort(const char *title, const char *message){
 }
 
 
+typedef struct ZipEntry{
+    char *fname; 
+    Uint32 compression_type;
+    Uint32 compressed_size;
+    Uint32 uncompressed_size;
+    Uint32 file_pos;
+} ZipEntry;
+
+typedef struct ZipArchive{
+    SDL_RWops *rw;
+    Uint32 num_entries;
+    ZipEntry *entries;
+} ZipArchive;
+
+static void ZipArchive_unload(ZipArchive *zip){
+    if(zip){
+        if(zip->rw) {
+            SDL_RWclose(zip->rw);
+        }
+        SDL_free(zip->entries);
+        SDL_free(zip);
+    }
+}
+
+static ZipArchive *ZipArchive_load(const char *fname){
+    SDL_RWops *rw = SDL_RWFromFile(fname, "rb");
+    if(!rw){
+        return NULL;
+    }
+
+    ZipArchive *ret_val = (ZipArchive *)SDL_calloc( 1, sizeof(ZipArchive));
+    if(ret_val == NULL){
+        SDL_RWclose(rw);
+        return NULL;
+    }
+
+    ret_val->rw = rw;
+
+    Uint32 ui32;
+    Uint16 ui16;
+
+    while(SDL_RWread(rw, &ui32, sizeof(ui32), 1) == 1){
+        ZipEntry entry;
+        SDL_zero(entry);
+
+        Uint16 fname_len;
+        Uint16 extra_len;
+
+        ui32 = SDL_SwapLE32(ui32);
+        if(ui32 != 0x04034b50 ){
+            break;
+        }
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // version needed to extract
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // general purpose bit flag
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // compression method
+        entry.compression_type = SDL_SwapLE16(ui16);
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // last mod file time
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // last mod file date
+        SDL_RWread(rw, &ui32, sizeof(ui32), 1); // crc-32
+        SDL_RWread(rw, &ui32, sizeof(ui32), 1); // compressed size
+        entry.compressed_size = SDL_SwapLE32(ui32);
+        SDL_RWread(rw, &ui32, sizeof(ui32), 1); // uncompressed size
+        entry.uncompressed_size = SDL_SwapLE32(ui32);
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // file name length
+        fname_len = SDL_SwapLE16(ui16);
+        SDL_RWread(rw, &ui16, sizeof(ui16), 1); // extra field length
+        extra_len = SDL_SwapLE16(ui16);
+
+        entry.fname = (char *) SDL_malloc(fname_len + 1);
+        SDL_RWread(rw, entry.fname, fname_len, 1);
+        entry.fname[fname_len] ='\0';
+        SDL_RWseek(rw, extra_len, RW_SEEK_CUR);
+
+        entry.file_pos = SDL_RWtell(rw); 
+        SDL_RWseek(rw, entry.compressed_size, RW_SEEK_CUR); /* ready for next local file header */
+
+        void *ptr = SDL_realloc(ret_val->entries, sizeof(ZipEntry) * (ret_val->num_entries + 1));
+
+        ret_val->entries = ptr;
+        SDL_memcpy(&ret_val->entries[ret_val->num_entries], &entry, sizeof(ZipEntry));
+        ret_val->num_entries++;
+    }
+    return ret_val;
+}
 
 
 
@@ -198,9 +282,12 @@ failed:
     stop_audio();
     return SDL_FALSE;
 }
-
-SDL_Texture *load_texture(const char *fname){
-    SDL_Surface *surface = SDL_LoadBMP(fname);
+/* Creates a Texture from Surface create from a file and returns it. */
+SDL_Texture *load_texture(SDL_RWops *rw){
+    if(rw == NULL){
+        return NULL;
+    }
+    SDL_Surface *surface = SDL_LoadBMP_RW(rw, 1);
     if(!surface){
         return NULL;
     }
@@ -262,7 +349,6 @@ static SDL_INLINE void init_skin_slider(WinAmpSkinSlider *slider, SDL_Texture *t
 }
 
 static void click_func_prev(void){
-    printf("Prev Pressed\n");
     SDL_AudioStreamClear(stream);
     if(SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1){
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "AudioStreamPut Failed!", SDL_GetError(), window);
@@ -274,25 +360,61 @@ static void click_func_prev(void){
 }
 
 static void click_func_pause(void){
-    printf("Pause Pressed\n");
     paused = paused ? SDL_FALSE : SDL_TRUE;
     SDL_PauseAudioDevice(audio_device, paused);
 }
 
 static void click_func_stop(void){
-    printf("Stop Pressed\n");
     stop_audio();
 }
 
+static SDL_RWops *openrw(ZipArchive *zip, const char *dirname, const char *fname){
+    if(zip){
+
+        for(Uint32 i = 0; i < zip->num_entries; ++i){
+            const ZipEntry *entry = &zip->entries[i];
+            if(SDL_strcasecmp(entry->fname, fname) == 0){
+                SDL_RWseek(zip->rw, entry->file_pos, RW_SEEK_SET);
+                Uint8 *data = SDL_malloc(entry->compressed_size);
+
+                SDL_RWread(zip->rw, data, entry->compressed_size, 1);
+                SDL_assert(entry->compression_type == 0);
+                // not checking if compressed data is actually compressed
+                return SDL_RWFromConstMem(data, entry->uncompressed_size);
+            }
+        }
+        return NULL;
+    }
+    // we dont have a zipfile, read from disk
+    const size_t fullpathlen = SDL_strlen(dirname) + 1 + SDL_strlen(fname) + 1;
+    char *fullpath = (char *)SDL_malloc(fullpathlen);
+    // FIXME: Name Case is a problem on linux
+    SDL_snprintf(fullpath, fullpathlen, "%s/%s", dirname, fname);
+    SDL_RWops *retval = SDL_RWFromFile(fullpath, "rb");
+    SDL_free(fullpath);
+    return retval;
+
+}
+
 // FIXME: Use fname variable
-static SDL_bool load_skin(WinAmpSkin *skin, const char *fname){
+static void load_skin(WinAmpSkin *skin, const char *fname){
+
+
+    if(skin->tex_main    ){ SDL_DestroyTexture(skin->tex_main    ); }
+    if(skin->tex_cbuttons){ SDL_DestroyTexture(skin->tex_cbuttons); }
+    if(skin->tex_volume  ){ SDL_DestroyTexture(skin->tex_volume  ); }
+    if(skin->tex_balance ){ SDL_DestroyTexture(skin->tex_balance ); }
 
     SDL_zerop(skin);
 
-    // FIXME: Hardcoded
-    skin->tex_main = load_texture("base/MAIN.BMP");
 
-    skin->tex_cbuttons = load_texture("base/CBUTTONS.BMP");
+    ZipArchive *zip = ZipArchive_load(fname);
+    skin->tex_main = load_texture(openrw(zip, fname, "MAIN.BMP"));
+    skin->tex_cbuttons = load_texture(openrw(zip, fname, "CBUTTONS.BMP"));
+    skin->tex_volume = load_texture(openrw(zip, fname, "VOLUME.BMP"));
+    skin->tex_balance = load_texture(openrw(zip, fname, "BALANCE.BMP"));
+    ZipArchive_unload(zip);
+
     init_skin_button(&skin->buttons[WASBTN_PREV],   skin->tex_cbuttons, click_func_prev,  23, 18,  16, 88,   0, 0,   0, 18);
     init_skin_button(&skin->buttons[WASBTN_PLAY],   skin->tex_cbuttons, NULL,  23, 18,  39, 88,  23, 0,  23, 18);
     init_skin_button(&skin->buttons[WASBTN_PAUSE],  skin->tex_cbuttons, click_func_pause, 23, 18,  62, 88,  46, 0,  46, 18);
@@ -300,13 +422,10 @@ static SDL_bool load_skin(WinAmpSkin *skin, const char *fname){
     init_skin_button(&skin->buttons[WASBTN_NEXT],   skin->tex_cbuttons, NULL,  22, 18, 108, 88,  92, 0,  92, 18);
     init_skin_button(&skin->buttons[WASBTN_EJECT],  skin->tex_cbuttons, NULL, 22, 16, 136, 89, 114, 0, 114, 16);
 
-    skin->tex_volume = load_texture("base/VOLUME.BMP");
     init_skin_slider(&skin->sliders[WASSLD_VOLUME], skin->tex_volume, 68, 13, 107, 57, 14, 11, 15, 422, 0, 422, 0, 0, 68, 15, 28, 1.0f);
 
-    skin->tex_balance = load_texture("base/BALANCE.BMP");
     init_skin_slider(&skin->sliders[WASSLD_BALANCE], skin->tex_balance, 38, 13, 177, 57, 14, 11, 15, 422, 0, 422, 9, 0, 47, 15, 28, 0.5f);
 
-    return SDL_TRUE;
 
 }
 
@@ -333,9 +452,7 @@ static void init_everything(int argc, char **argv){
 
 
     // FIXME: Load a real thing
-    if(!load_skin(&skin, "")){
-        panic_and_abort("Load Initial Skin Failed!", SDL_GetError());
-    }
+    load_skin(&skin, "base.wsz");
 
     SDL_zero(desired);
     desired.freq = 48000;
@@ -483,7 +600,6 @@ static SDL_bool handle_events(WinAmpSkin *skin){
 
                 if(skin->pressed){
                     SDL_CaptureMouse(SDL_FALSE);
-                    printf("Button Pressed::Function: %lX\n", (size_t)skin->pressed->onClick);
                     if(skin->pressed->onClick != NULL){
                         const SDL_Point pt = {e.button.x, e.button.y};
                         if(SDL_PointInRect(&pt, &skin->pressed->dst_rect)){
@@ -501,10 +617,16 @@ static SDL_bool handle_events(WinAmpSkin *skin){
                  }
                  break;
              }
-            case SDL_DROPFILE:
-                open_new_audio_file(e.drop.file);
+            case SDL_DROPFILE:{
+                const char *ptr = SDL_strrchr(e.drop.file, '.');
+                if(ptr && ((SDL_strcasecmp(ptr, ".wsz") == 0) || (SDL_strcasecmp(ptr, ".zip") == 0))){
+                    load_skin(skin, e.drop.file);
+                }else{
+                    open_new_audio_file(e.drop.file);
+                }
                 SDL_free(e.drop.file);
                 break;
+            }
         }
     }
     // Keep going
